@@ -371,7 +371,7 @@ class AutoClickerApp:
         for opt in ["Left", "Right", "Middle"]:
             rb = tk.Radiobutton(mb_card, text=f"{opt} Click", variable=self.button_var, value=opt,
                                  bg=CARD_BG, fg=TEXT, selectcolor=CARD_BG, activebackground=CARD_BG,
-                                 activeforeground=TEXT, font=("Segoe UI", 10.5),
+                                 activeforeground=TEXT, font=("Segoe UI", 11),
                                  command=self._sync_button, anchor="w")
             rb.pack(fill="x", padx=16, pady=4)
             self.radio_buttons.append(rb)

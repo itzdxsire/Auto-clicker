@@ -1,32 +1,26 @@
 """
-Customizable Auto Clicker for Windows
+Simple AutoClicker for Windows
 ---------------------------------------
-Features:
+A modern, card-based autoclicker with:
   - CPS (clicks per second) control
-  - CDC (click duty cycle) control - the % of each click cycle the
-    mouse button is held "down" vs "up"
-  - Fully custom hotkeys - click "Set Hotkey" and press any key or
-    key combo (e.g. Shift+R, Ctrl+Alt+F, etc.) to bind it
-  - Customizable UI: pick from preset color themes, or choose your
-    own two colors for a custom gradient background
+  - CDC (click duty cycle) control
+  - Left / Right / Middle click support
+  - Fully custom hotkey capture (press any key or combo)
+  - Sidebar navigation (Main / Settings / About)
+  - Selectable accent color themes + custom color picker
 
 Requirements:
   - Windows (uses the Win32 SendInput API directly via ctypes, no
     third-party packages required)
-  - Python 3.8+ with tkinter (this ships with the standard python.org
-    installer on Windows by default)
+  - Python 3.8+ with tkinter (ships with the standard python.org
+    installer on Windows)
 
 Run:
   python autoclicker.py
 
-Turn into a standalone .exe (optional, run this ON Windows):
+Build a standalone .exe (run this ON Windows):
   pip install pyinstaller
   pyinstaller --onefile --noconsole --name AutoClicker autoclicker.py
-  (the .exe will show up in the generated "dist" folder)
-
-Note: some games/anti-cheat systems and some antivirus tools flag
-autoclickers. Use responsibly and check the rules of anything you use
-this with.
 """
 
 import ctypes
@@ -34,14 +28,14 @@ import sys
 import threading
 import time
 import tkinter as tk
-from tkinter import ttk, colorchooser
+from tkinter import colorchooser
 
 if sys.platform != "win32":
     print("This autoclicker uses the Win32 API and only runs on Windows.")
     sys.exit(1)
 
 # ---------------------------------------------------------------------------
-# Low level mouse click simulation (Win32 SendInput) - no external packages
+# Low level mouse click simulation (Win32 SendInput)
 # ---------------------------------------------------------------------------
 
 PUL = ctypes.POINTER(ctypes.c_ulong)
@@ -49,12 +43,9 @@ PUL = ctypes.POINTER(ctypes.c_ulong)
 
 class MouseInput(ctypes.Structure):
     _fields_ = [
-        ("dx", ctypes.c_long),
-        ("dy", ctypes.c_long),
-        ("mouseData", ctypes.c_ulong),
-        ("dwFlags", ctypes.c_ulong),
-        ("time", ctypes.c_ulong),
-        ("dwExtraInfo", PUL),
+        ("dx", ctypes.c_long), ("dy", ctypes.c_long),
+        ("mouseData", ctypes.c_ulong), ("dwFlags", ctypes.c_ulong),
+        ("time", ctypes.c_ulong), ("dwExtraInfo", PUL),
     ]
 
 
@@ -71,8 +62,13 @@ MOUSEEVENTF_LEFTDOWN = 0x0002
 MOUSEEVENTF_LEFTUP = 0x0004
 MOUSEEVENTF_RIGHTDOWN = 0x0008
 MOUSEEVENTF_RIGHTUP = 0x0010
+MOUSEEVENTF_MIDDLEDOWN = 0x0020
+MOUSEEVENTF_MIDDLEUP = 0x0040
 
 user32 = ctypes.windll.user32
+
+DOWN_FLAGS = {"Left": MOUSEEVENTF_LEFTDOWN, "Right": MOUSEEVENTF_RIGHTDOWN, "Middle": MOUSEEVENTF_MIDDLEDOWN}
+UP_FLAGS = {"Left": MOUSEEVENTF_LEFTUP, "Right": MOUSEEVENTF_RIGHTUP, "Middle": MOUSEEVENTF_MIDDLEUP}
 
 
 def _send(flag):
@@ -83,12 +79,12 @@ def _send(flag):
     user32.SendInput(1, ctypes.pointer(inp), ctypes.sizeof(inp))
 
 
-def mouse_down(right=False):
-    _send(MOUSEEVENTF_RIGHTDOWN if right else MOUSEEVENTF_LEFTDOWN)
+def mouse_down(button="Left"):
+    _send(DOWN_FLAGS[button])
 
 
-def mouse_up(right=False):
-    _send(MOUSEEVENTF_RIGHTUP if right else MOUSEEVENTF_LEFTUP)
+def mouse_up(button="Left"):
+    _send(UP_FLAGS[button])
 
 
 def is_key_pressed(vk_code):
@@ -96,47 +92,30 @@ def is_key_pressed(vk_code):
 
 
 # ---------------------------------------------------------------------------
-# Virtual key code map (for custom hotkey capture + display)
+# Virtual key map (for custom hotkey capture + display)
 # ---------------------------------------------------------------------------
 
-VK_SHIFT = 0x10
-VK_CONTROL = 0x11
-VK_MENU = 0x12  # Alt
-VK_ESCAPE = 0x1B
-
+VK_SHIFT, VK_CONTROL, VK_MENU, VK_ESCAPE = 0x10, 0x11, 0x12, 0x1B
 MODIFIER_VKS = (VK_SHIFT, VK_CONTROL, VK_MENU)
 
 VK_NAMES = {}
-# Letters
 for i in range(26):
     VK_NAMES[0x41 + i] = chr(ord('A') + i)
-# Digits
 for i in range(10):
     VK_NAMES[0x30 + i] = str(i)
-# Function keys
 for i in range(1, 13):
     VK_NAMES[0x6F + i] = f"F{i}"
-
 VK_NAMES.update({
-    VK_SHIFT: "Shift",
-    VK_CONTROL: "Ctrl",
-    VK_MENU: "Alt",
-    0x20: "Space",
-    0x09: "Tab",
-    0x0D: "Enter",
-    0x08: "Backspace",
-    0x14: "CapsLock",
-    VK_ESCAPE: "Esc",
+    VK_SHIFT: "Shift", VK_CONTROL: "Ctrl", VK_MENU: "Alt",
+    0x20: "Space", 0x09: "Tab", 0x0D: "Enter", 0x08: "Backspace",
+    0x14: "CapsLock", VK_ESCAPE: "Esc",
     0x25: "Left", 0x26: "Up", 0x27: "Right", 0x28: "Down",
     0x2D: "Insert", 0x2E: "Delete", 0x24: "Home", 0x23: "End",
-    0x21: "PageUp", 0x22: "PageDown",
-    0xC0: "`",
+    0x21: "PageUp", 0x22: "PageDown", 0xC0: "`",
     0xBA: ";", 0xBB: "=", 0xBC: ",", 0xBD: "-", 0xBE: ".", 0xBF: "/",
     0xDB: "[", 0xDC: "\\", 0xDD: "]", 0xDE: "'",
 })
-
-# Candidate keys scanned while capturing a new hotkey (non-modifier "main" keys)
-MAIN_KEY_CANDIDATES = [vk for vk in VK_NAMES.keys() if vk not in MODIFIER_VKS]
+MAIN_KEY_CANDIDATES = [vk for vk in VK_NAMES if vk not in MODIFIER_VKS]
 
 
 def vk_name(vk):
@@ -144,48 +123,26 @@ def vk_name(vk):
 
 
 def combo_to_string(combo):
-    if not combo:
-        return "None"
-    return " + ".join(vk_name(vk) for vk in combo)
+    return " + ".join(vk_name(vk) for vk in combo) if combo else "None"
 
 
 def is_combo_pressed(combo):
-    if not combo:
-        return False
-    return all(is_key_pressed(vk) for vk in combo)
+    return bool(combo) and all(is_key_pressed(vk) for vk in combo)
 
 
 # ---------------------------------------------------------------------------
-# Color themes
+# Colors / style constants
 # ---------------------------------------------------------------------------
 
-THEMES = {
-    "Midnight":  {"g1": "#0f0c29", "g2": "#302b63", "accent": "#7b6ff6", "fg": "#f0f0ff"},
-    "Ocean":     {"g1": "#005c97", "g2": "#363795", "accent": "#00c6ff", "fg": "#ffffff"},
-    "Sunset":    {"g1": "#ff512f", "g2": "#dd2476", "accent": "#ffdf6b", "fg": "#ffffff"},
-    "Neon":      {"g1": "#0f2027", "g2": "#2c5364", "accent": "#39ff14", "fg": "#e8ffe8"},
-    "Cotton Candy": {"g1": "#ff9a9e", "g2": "#a18cd1", "accent": "#ffffff", "fg": "#33254a"},
-    "Slate":     {"g1": "#232526", "g2": "#414345", "accent": "#00d4ff", "fg": "#ffffff"},
-}
+BG = "#0b0b0f"
+SIDEBAR_BG = "#111116"
+CARD_BG = "#15151c"
+CARD_BORDER = "#24242e"
+TEXT = "#e9e9ee"
+SUBTEXT = "#9a9aa5"
+STOPPED_RED = "#ef4444"
 
-
-def hex_to_rgb(h):
-    h = h.lstrip("#")
-    return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
-
-
-def rgb_to_hex(rgb):
-    return "#%02x%02x%02x" % rgb
-
-
-def interpolate_color(c1, c2, t):
-    r1, g1, b1 = hex_to_rgb(c1)
-    r2, g2, b2 = hex_to_rgb(c2)
-    return rgb_to_hex((
-        int(r1 + (r2 - r1) * t),
-        int(g1 + (g2 - g1) * t),
-        int(b1 + (b2 - b1) * t),
-    ))
+ACCENT_PRESETS = ["#7c3aed", "#3b82f6", "#22c55e", "#ef4444", "#f97316", "#ec4899", "#6b7280"]
 
 
 # ---------------------------------------------------------------------------
@@ -196,9 +153,9 @@ class ClickerEngine:
     def __init__(self):
         self.running = False
         self.enabled = False
-        self.cps = 10.0
-        self.cdc = 50.0  # percent of the cycle spent "held down"
-        self.right_click = False
+        self.cps = 20.0
+        self.cdc = 50.0
+        self.button = "Left"
         self._thread = None
 
     def start(self):
@@ -215,16 +172,34 @@ class ClickerEngine:
                 period = 1.0 / max(self.cps, 0.1)
                 down_time = max(period * (self.cdc / 100.0), 0.001)
                 up_time = max(period - down_time, 0.001)
-                mouse_down(self.right_click)
+                mouse_down(self.button)
                 time.sleep(down_time)
-                mouse_up(self.right_click)
+                mouse_up(self.button)
                 time.sleep(up_time)
             else:
                 time.sleep(0.02)
 
 
 # ---------------------------------------------------------------------------
-# GUI
+# Small reusable UI helpers
+# ---------------------------------------------------------------------------
+
+def card(parent, **kw):
+    f = tk.Frame(parent, bg=CARD_BG, highlightbackground=CARD_BORDER,
+                 highlightthickness=1, bd=0)
+    f.configure(**kw)
+    return f
+
+
+def card_title(parent, text, accent):
+    lbl = tk.Label(parent, text=text, bg=CARD_BG, fg=accent,
+                    font=("Segoe UI", 11, "bold"))
+    lbl.pack(anchor="w", padx=16, pady=(14, 8))
+    return lbl
+
+
+# ---------------------------------------------------------------------------
+# Main App
 # ---------------------------------------------------------------------------
 
 class AutoClickerApp:
@@ -233,182 +208,314 @@ class AutoClickerApp:
         self.engine = ClickerEngine()
         self.engine.start()
 
-        self.theme_name = tk.StringVar(value="Midnight")
-        self.custom_g1 = "#0f0c29"
-        self.custom_g2 = "#302b63"
-        self.use_custom = False
-
-        self.cps_var = tk.DoubleVar(value=10.0)
-        self.cdc_var = tk.DoubleVar(value=50.0)
+        self.accent = ACCENT_PRESETS[0]
+        self.cps_var = tk.StringVar(value="20")
+        self.cdc_var = tk.StringVar(value="50")
         self.button_var = tk.StringVar(value="Left")
 
-        # Hotkey state: default = F6 alone. Can be reset to any combo.
         self.hotkey_combo = [0x75]  # F6
         self.capturing_hotkey = False
         self.capture_start_time = 0.0
         self._hotkey_prev_state = False
 
-        root.title("Auto Clicker")
-        root.geometry("460x600")
+        self.accent_swatch_canvases = []
+
+        root.title("Simple AutoClicker")
+        root.configure(bg=BG)
+        root.geometry("900x640")
         root.resizable(False, False)
 
-        self.canvas = tk.Canvas(root, width=460, height=600, highlightthickness=0)
-        self.canvas.pack(fill="both", expand=True)
-
-        self.content = tk.Frame(self.canvas, bg="#1c1c1c")
-        self.canvas.create_window(230, 300, window=self.content, width=420, height=560)
-
-        self._build_ui()
-        self._apply_theme()
+        self._build_layout()
+        self._show_page("main")
+        self._apply_accent()
         self._poll_hotkey()
 
-    # ----- UI construction -----
-    def _build_ui(self):
-        self.title_label = tk.Label(self.content, text="AUTO CLICKER", font=("Segoe UI", 20, "bold"))
-        self.title_label.pack(pady=(18, 4))
+    # ----- top level layout -----
+    def _build_layout(self):
+        outer = tk.Frame(self.root, bg=BG)
+        outer.pack(fill="both", expand=True)
 
-        self.status_label = tk.Label(self.content, text="STOPPED", font=("Segoe UI", 12, "bold"))
-        self.status_label.pack(pady=(0, 16))
+        # Sidebar
+        self.sidebar = tk.Frame(outer, bg=SIDEBAR_BG, width=190)
+        self.sidebar.pack(side="left", fill="y")
+        self.sidebar.pack_propagate(False)
 
-        # CPS
-        cps_frame = tk.Frame(self.content)
-        cps_frame.pack(fill="x", padx=24, pady=6)
-        self.cps_title = tk.Label(cps_frame, text="Clicks Per Second (CPS)", font=("Segoe UI", 10, "bold"))
-        self.cps_title.pack(anchor="w")
-        cps_row = tk.Frame(cps_frame)
-        cps_row.pack(fill="x")
-        self.cps_scale = tk.Scale(cps_row, from_=1, to=50, orient="horizontal",
-                                   variable=self.cps_var, resolution=0.5,
-                                   showvalue=False, command=lambda v: self._sync_cps())
-        self.cps_scale.pack(side="left", fill="x", expand=True)
-        self.cps_entry = tk.Entry(cps_row, width=6, justify="center")
-        self.cps_entry.pack(side="left", padx=(8, 0))
-        self.cps_entry.insert(0, "10.0")
-        self.cps_entry.bind("<Return>", lambda e: self._set_cps_from_entry())
-        self.cps_entry.bind("<FocusOut>", lambda e: self._set_cps_from_entry())
+        title_row = tk.Frame(self.sidebar, bg=SIDEBAR_BG)
+        title_row.pack(fill="x", pady=(20, 24), padx=16)
+        self.logo_label = tk.Label(title_row, text="\u2716", bg=SIDEBAR_BG,
+                                    font=("Segoe UI", 16, "bold"))
+        self.logo_label.pack(side="left")
+        tk.Label(title_row, text=" AutoClicker", bg=SIDEBAR_BG, fg=TEXT,
+                 font=("Segoe UI", 13, "bold")).pack(side="left")
 
-        # CDC
-        cdc_frame = tk.Frame(self.content)
-        cdc_frame.pack(fill="x", padx=24, pady=6)
-        self.cdc_title = tk.Label(cdc_frame, text="Click Duty Cycle (CDC) - % held down per click",
-                                   font=("Segoe UI", 10, "bold"))
-        self.cdc_title.pack(anchor="w")
-        cdc_row = tk.Frame(cdc_frame)
-        cdc_row.pack(fill="x")
-        self.cdc_scale = tk.Scale(cdc_row, from_=1, to=95, orient="horizontal",
-                                   variable=self.cdc_var, resolution=1,
-                                   showvalue=False, command=lambda v: self._sync_cdc())
-        self.cdc_scale.pack(side="left", fill="x", expand=True)
-        self.cdc_entry = tk.Entry(cdc_row, width=6, justify="center")
-        self.cdc_entry.pack(side="left", padx=(8, 0))
-        self.cdc_entry.insert(0, "50")
-        self.cdc_entry.bind("<Return>", lambda e: self._set_cdc_from_entry())
-        self.cdc_entry.bind("<FocusOut>", lambda e: self._set_cdc_from_entry())
+        self.nav_buttons = {}
+        for key, label, icon in [("main", "Main", "\u2302"),
+                                  ("settings", "Settings", "\u2699"),
+                                  ("about", "About", "\u2139")]:
+            b = tk.Label(self.sidebar, text=f"  {icon}   {label}", bg=SIDEBAR_BG, fg=SUBTEXT,
+                         font=("Segoe UI", 11), anchor="w", padx=8, pady=10, cursor="hand2")
+            b.pack(fill="x", padx=10, pady=2)
+            b.bind("<Button-1>", lambda e, k=key: self._show_page(k))
+            self.nav_buttons[key] = b
 
-        # Mouse button
-        opts_frame = tk.Frame(self.content)
-        opts_frame.pack(fill="x", padx=24, pady=(10, 6))
-        self.button_title = tk.Label(opts_frame, text="Mouse Button", font=("Segoe UI", 10, "bold"))
-        self.button_title.pack(anchor="w")
-        self.button_menu = ttk.Combobox(opts_frame, textvariable=self.button_var,
-                                         values=["Left", "Right"], state="readonly", width=10)
-        self.button_menu.pack(anchor="w", pady=(2, 0))
-        self.button_menu.bind("<<ComboboxSelected>>", lambda e: self._sync_button())
+        tk.Label(self.sidebar, text="v1.0.0", bg=SIDEBAR_BG, fg=SUBTEXT,
+                 font=("Segoe UI", 8)).pack(side="bottom", pady=14, padx=16, anchor="w")
 
-        # Hotkey (custom capture)
-        hotkey_frame = tk.Frame(self.content)
-        hotkey_frame.pack(fill="x", padx=24, pady=(10, 6))
-        self.hotkey_title = tk.Label(hotkey_frame, text="Toggle Hotkey", font=("Segoe UI", 10, "bold"))
-        self.hotkey_title.pack(anchor="w")
-        hotkey_row = tk.Frame(hotkey_frame)
-        hotkey_row.pack(fill="x", pady=(2, 0))
-        self.hotkey_display = tk.Label(hotkey_row, text=combo_to_string(self.hotkey_combo),
-                                        font=("Segoe UI", 11, "bold"), relief="groove", padx=10, pady=6)
-        self.hotkey_display.pack(side="left", fill="x", expand=True)
-        self.set_hotkey_btn = tk.Button(hotkey_row, text="Set Hotkey", command=self._begin_capture)
-        self.set_hotkey_btn.pack(side="left", padx=(8, 0))
+        # Content area (pages stacked / swapped)
+        self.content = tk.Frame(outer, bg=BG)
+        self.content.pack(side="left", fill="both", expand=True)
 
-        # Start/Stop button
-        self.toggle_btn = tk.Button(self.content, text="START (or press hotkey)",
-                                     font=("Segoe UI", 12, "bold"), relief="flat",
-                                     command=self._toggle, height=2)
-        self.toggle_btn.pack(fill="x", padx=24, pady=18)
+        self.pages = {
+            "main": self._build_main_page(self.content),
+            "settings": self._build_settings_page(self.content),
+            "about": self._build_about_page(self.content),
+        }
 
-        # Theme picker
-        theme_frame = tk.Frame(self.content)
-        theme_frame.pack(fill="x", padx=24, pady=(4, 4))
-        self.theme_title = tk.Label(theme_frame, text="Theme", font=("Segoe UI", 10, "bold"))
-        self.theme_title.pack(anchor="w")
-        self.theme_menu = ttk.Combobox(theme_frame, textvariable=self.theme_name,
-                                        values=list(THEMES.keys()) + ["Custom..."],
-                                        state="readonly")
-        self.theme_menu.pack(fill="x", pady=(2, 6))
-        self.theme_menu.bind("<<ComboboxSelected>>", lambda e: self._on_theme_change())
+    def _show_page(self, key):
+        for k, frame in self.pages.items():
+            frame.pack_forget()
+        self.pages[key].pack(fill="both", expand=True)
+        for k, btn in self.nav_buttons.items():
+            if k == key:
+                btn.configure(bg="#1d1d27", fg=TEXT)
+            else:
+                btn.configure(bg=SIDEBAR_BG, fg=SUBTEXT)
 
-        custom_row = tk.Frame(theme_frame)
-        custom_row.pack(fill="x")
-        self.pick_g1_btn = tk.Button(custom_row, text="Gradient Color 1", command=self._pick_color1)
-        self.pick_g1_btn.pack(side="left", expand=True, fill="x", padx=(0, 4))
-        self.pick_g2_btn = tk.Button(custom_row, text="Gradient Color 2", command=self._pick_color2)
-        self.pick_g2_btn.pack(side="left", expand=True, fill="x", padx=(4, 0))
+    # ----- MAIN PAGE -----
+    def _build_main_page(self, parent):
+        page = tk.Frame(parent, bg=BG)
+        pad = 20
 
-        self.hint_label = tk.Label(self.content,
-                                    text="Hotkey works globally, even if this window\nisn't focused.",
-                                    font=("Segoe UI", 9), justify="center")
-        self.hint_label.pack(pady=(14, 0))
+        # --- top row: status card + start/stop ---
+        top_row = tk.Frame(page, bg=BG)
+        top_row.pack(fill="x", padx=pad, pady=(pad, 12))
+
+        self.status_card = card(top_row)
+        self.status_card.pack(side="left", fill="both", expand=True, padx=(0, 12), ipady=10)
+
+        status_inner = tk.Frame(self.status_card, bg=CARD_BG)
+        status_inner.pack(fill="both", expand=True, padx=16, pady=16)
+
+        self.status_canvas = tk.Canvas(status_inner, width=70, height=70, bg=CARD_BG, highlightthickness=0)
+        self.status_canvas.pack(side="left", padx=(0, 16))
+
+        text_col = tk.Frame(status_inner, bg=CARD_BG)
+        text_col.pack(side="left", fill="both", expand=True)
+        status_row = tk.Frame(text_col, bg=CARD_BG)
+        status_row.pack(anchor="w")
+        tk.Label(status_row, text="Status: ", bg=CARD_BG, fg=TEXT,
+                 font=("Segoe UI", 13)).pack(side="left")
+        self.status_value_label = tk.Label(status_row, text="Stopped", bg=CARD_BG, fg=STOPPED_RED,
+                                            font=("Segoe UI", 13, "bold"))
+        self.status_value_label.pack(side="left")
+        self.status_sub_label = tk.Label(text_col, text="Press your hotkey to start clicking",
+                                          bg=CARD_BG, fg=SUBTEXT, font=("Segoe UI", 9))
+        self.status_sub_label.pack(anchor="w", pady=(4, 0))
+
+        btn_col = tk.Frame(top_row, bg=BG)
+        btn_col.pack(side="left", fill="y")
+        self.start_btn = tk.Button(btn_col, text="\u25B6  Start (F6)", font=("Segoe UI", 11, "bold"),
+                                    relief="flat", bd=0, width=18, height=2, command=self._start_clicking)
+        self.start_btn.pack(pady=(0, 8))
+        self.stop_btn = tk.Button(btn_col, text="\u25A0  Stop (F6)", font=("Segoe UI", 11, "bold"),
+                                   relief="flat", bd=0, width=18, height=2, command=self._stop_clicking)
+        self.stop_btn.pack()
+
+        # --- middle row: left column (cps/cdc) + right column (button/hotkey) ---
+        mid_row = tk.Frame(page, bg=BG)
+        mid_row.pack(fill="both", expand=True, padx=pad, pady=6)
+
+        left_col = tk.Frame(mid_row, bg=BG)
+        left_col.pack(side="left", fill="both", expand=True, padx=(0, 12))
+        right_col = tk.Frame(mid_row, bg=BG, width=270)
+        right_col.pack(side="left", fill="y")
+        right_col.pack_propagate(False)
+
+        # CPS card
+        cps_card = card(left_col)
+        cps_card.pack(fill="x", pady=(0, 12))
+        self.cps_title = card_title(cps_card, "\u26A1 CPS (Clicks Per Second)", self.accent)
+        cps_row = tk.Frame(cps_card, bg=CARD_BG)
+        cps_row.pack(fill="x", padx=16, pady=(0, 16))
+        self.cps_spin = tk.Spinbox(cps_row, from_=1, to=200, textvariable=self.cps_var,
+                                    font=("Segoe UI", 13), width=10, relief="flat",
+                                    bg="#1c1c25", fg=TEXT, insertbackground=TEXT,
+                                    buttonbackground="#1c1c25", justify="left")
+        self.cps_spin.pack(fill="x", ipady=6)
+        self.cps_var.trace_add("write", lambda *a: self._sync_cps())
+
+        # CDC card
+        cdc_card = card(left_col)
+        cdc_card.pack(fill="x")
+        self.cdc_title = card_title(cdc_card, "\u25D4 CDC (Click Duty Cycle)", self.accent)
+        cdc_row = tk.Frame(cdc_card, bg=CARD_BG)
+        cdc_row.pack(fill="x", padx=16)
+        self.cdc_spin = tk.Spinbox(cdc_row, from_=1, to=99, textvariable=self.cdc_var,
+                                    font=("Segoe UI", 13), width=10, relief="flat",
+                                    bg="#1c1c25", fg=TEXT, insertbackground=TEXT,
+                                    buttonbackground="#1c1c25", justify="left")
+        self.cdc_spin.pack(side="left", fill="x", expand=True, ipady=6)
+        tk.Label(cdc_row, text="%", bg=CARD_BG, fg=SUBTEXT, font=("Segoe UI", 12)).pack(side="left", padx=8)
+        self.cdc_var.trace_add("write", lambda *a: self._sync_cdc())
+
+        note = tk.Frame(cdc_card, bg=CARD_BG)
+        note.pack(fill="x", padx=16, pady=(10, 16))
+        tk.Label(note, text="\u2139  Duty Cycle determines the ratio of click\n     time to the total click cycle.",
+                 bg=CARD_BG, fg=SUBTEXT, font=("Segoe UI", 9), justify="left").pack(anchor="w")
+
+        # Mouse button card
+        mb_card = card(right_col)
+        mb_card.pack(fill="x", pady=(0, 12))
+        self.mb_title = card_title(mb_card, "\U0001F5B1 Mouse Button", self.accent)
+        self.radio_buttons = []
+        for opt in ["Left", "Right", "Middle"]:
+            rb = tk.Radiobutton(mb_card, text=f"{opt} Click", variable=self.button_var, value=opt,
+                                 bg=CARD_BG, fg=TEXT, selectcolor=CARD_BG, activebackground=CARD_BG,
+                                 activeforeground=TEXT, font=("Segoe UI", 10.5),
+                                 command=self._sync_button, anchor="w")
+            rb.pack(fill="x", padx=16, pady=4)
+            self.radio_buttons.append(rb)
+        tk.Frame(mb_card, bg=CARD_BG, height=10).pack()
+
+        # Hotkey card
+        hk_card = card(right_col)
+        hk_card.pack(fill="x")
+        self.hk_title = card_title(hk_card, "\u2328 Hotkey", self.accent)
+        hk_row = tk.Frame(hk_card, bg=CARD_BG)
+        hk_row.pack(fill="x", padx=16, pady=(0, 16))
+        self.hotkey_display = tk.Label(hk_row, text=combo_to_string(self.hotkey_combo), bg="#1c1c25",
+                                        fg=TEXT, font=("Segoe UI", 11, "bold"), pady=8)
+        self.hotkey_display.pack(fill="x", pady=(0, 8))
+        self.set_hotkey_btn = tk.Button(hk_row, text="Set Hotkey", relief="flat", bd=0,
+                                         bg="#24242e", fg=TEXT, font=("Segoe UI", 10),
+                                         command=self._begin_capture)
+        self.set_hotkey_btn.pack(fill="x", ipady=6)
+
+        # --- theme card ---
+        theme_card = card(page)
+        theme_card.pack(fill="x", padx=pad, pady=(12, pad))
+        self.theme_title = card_title(theme_card, "\U0001F3A8 Theme / Color", self.accent)
+        swatch_row = tk.Frame(theme_card, bg=CARD_BG)
+        swatch_row.pack(fill="x", padx=16, pady=(0, 18))
+
+        for color in ACCENT_PRESETS:
+            self._make_swatch(swatch_row, color)
+        self._make_custom_swatch(swatch_row)
+
+        return page
+
+    def _make_swatch(self, parent, color):
+        c = tk.Canvas(parent, width=40, height=40, bg=CARD_BG, highlightthickness=0, cursor="hand2")
+        c.pack(side="left", padx=6)
+        c.create_oval(4, 4, 36, 36, fill=color, outline="")
+        c.color = color
+        c.bind("<Button-1>", lambda e, col=color: self._select_accent(col))
+        self.accent_swatch_canvases.append(c)
+
+    def _make_custom_swatch(self, parent):
+        c = tk.Canvas(parent, width=40, height=40, bg=CARD_BG, highlightthickness=0, cursor="hand2")
+        c.pack(side="left", padx=6)
+        c.create_oval(4, 4, 36, 36, fill=CARD_BG, outline=SUBTEXT, dash=(2, 2))
+        c.create_text(20, 20, text="+", fill=SUBTEXT, font=("Segoe UI", 14, "bold"))
+        c.color = None
+        c.bind("<Button-1>", lambda e: self._pick_custom_accent())
+
+    # ----- SETTINGS PAGE -----
+    def _build_settings_page(self, parent):
+        page = tk.Frame(parent, bg=BG)
+        wrap = card(page)
+        wrap.pack(fill="x", padx=20, pady=20)
+        card_title(wrap, "\u2699 Settings", self.accent)
+        tk.Label(wrap, text="This build keeps things simple - all options live on the Main page.\n"
+                             "(CPS, CDC, mouse button, hotkey, and theme.)",
+                 bg=CARD_BG, fg=SUBTEXT, font=("Segoe UI", 10), justify="left").pack(
+            anchor="w", padx=16, pady=(0, 18))
+        return page
+
+    # ----- ABOUT PAGE -----
+    def _build_about_page(self, parent):
+        page = tk.Frame(parent, bg=BG)
+        wrap = card(page)
+        wrap.pack(fill="x", padx=20, pady=20)
+        card_title(wrap, "\u2139 About", self.accent)
+        tk.Label(wrap, text="Simple AutoClicker  \u2022  v1.0.0\n\n"
+                             "Built with Python + tkinter. Uses the Win32 SendInput API "
+                             "to simulate mouse clicks, and GetAsyncKeyState to listen for "
+                             "your custom hotkey globally.\n\n"
+                             "Some games and antivirus tools flag autoclickers - use responsibly.",
+                 bg=CARD_BG, fg=SUBTEXT, font=("Segoe UI", 10), justify="left", wraplength=600).pack(
+            anchor="w", padx=16, pady=(0, 18))
+        return page
 
     # ----- value syncing -----
     def _sync_cps(self):
-        v = round(self.cps_var.get(), 1)
-        self.engine.cps = v
-        self.cps_entry.delete(0, "end")
-        self.cps_entry.insert(0, str(v))
-
-    def _set_cps_from_entry(self):
         try:
-            v = float(self.cps_entry.get())
-            v = max(0.1, min(v, 200))
+            v = float(self.cps_var.get())
+            if v > 0:
+                self.engine.cps = v
         except ValueError:
-            v = self.cps_var.get()
-        self.cps_var.set(v)
-        self.engine.cps = v
+            pass
 
     def _sync_cdc(self):
-        v = round(self.cdc_var.get())
-        self.engine.cdc = v
-        self.cdc_entry.delete(0, "end")
-        self.cdc_entry.insert(0, str(v))
-
-    def _set_cdc_from_entry(self):
         try:
-            v = float(self.cdc_entry.get())
-            v = max(1, min(v, 99))
+            v = float(self.cdc_var.get())
+            if 0 < v < 100:
+                self.engine.cdc = v
         except ValueError:
-            v = self.cdc_var.get()
-        self.cdc_var.set(v)
-        self.engine.cdc = v
+            pass
 
     def _sync_button(self):
-        self.engine.right_click = (self.button_var.get() == "Right")
+        self.engine.button = self.button_var.get()
 
-    def _toggle(self):
-        self.engine.enabled = not self.engine.enabled
+    # ----- start/stop -----
+    def _start_clicking(self):
+        self.engine.enabled = True
         self._refresh_status()
 
-    def _refresh_status(self):
+    def _stop_clicking(self):
+        self.engine.enabled = False
+        self._refresh_status()
+
+    def _toggle(self):
         if self.engine.enabled:
-            self.status_label.config(text="RUNNING", fg=self._accent)
-            self.toggle_btn.config(text="STOP (or press hotkey)")
+            self._stop_clicking()
         else:
-            self.status_label.config(text="STOPPED", fg="#ff5555")
-            self.toggle_btn.config(text="START (or press hotkey)")
+            self._start_clicking()
+
+    def _refresh_status(self):
+        hk = combo_to_string(self.hotkey_combo)
+        self.start_btn.config(text=f"\u25B6  Start ({hk})")
+        self.stop_btn.config(text=f"\u25A0  Stop ({hk})")
+        if self.engine.enabled:
+            self.status_value_label.config(text="Running", fg=self.accent)
+            self.status_sub_label.config(text="Press your hotkey to stop clicking")
+            self.start_btn.config(bg="#24242e", fg=SUBTEXT, state="normal")
+            self.stop_btn.config(bg=self.accent, fg="#ffffff")
+        else:
+            self.status_value_label.config(text="Stopped", fg=STOPPED_RED)
+            self.status_sub_label.config(text="Press your hotkey to start clicking")
+            self.start_btn.config(bg=self.accent, fg="#ffffff")
+            self.stop_btn.config(bg="#24242e", fg=SUBTEXT)
+        self._draw_status_ring()
+
+    def _draw_status_ring(self):
+        c = self.status_canvas
+        c.delete("all")
+        color = self.accent if self.engine.enabled else "#3a3a45"
+        c.create_oval(6, 6, 64, 64, outline=color, width=3)
+        # simple cursor arrow
+        c.create_polygon(27, 22, 27, 46, 33, 40, 37, 48, 41, 46, 37, 38, 45, 38,
+                          fill=TEXT, outline="")
+        if self.engine.enabled:
+            for dx, dy in [(10, 8), (60, 10), (8, 58)]:
+                c.create_line(dx, dy, dx + 6, dy + 4, fill=color, width=2)
 
     # ----- hotkey capture -----
     def _begin_capture(self):
         self.capturing_hotkey = True
         self.capture_start_time = time.time()
-        self.set_hotkey_btn.config(text="...", state="disabled")
-        self.hotkey_display.config(text="Press keys... (Esc to cancel)")
+        self.set_hotkey_btn.config(text="Press keys... (Esc cancels)", state="disabled")
+        self.hotkey_display.config(text="...")
 
     def _finish_capture(self, combo):
         self.capturing_hotkey = False
@@ -416,14 +523,13 @@ class AutoClickerApp:
             self.hotkey_combo = combo
         self.hotkey_display.config(text=combo_to_string(self.hotkey_combo))
         self.set_hotkey_btn.config(text="Set Hotkey", state="normal")
+        self._refresh_status()
 
     def _poll_hotkey(self):
         if self.capturing_hotkey:
-            # small grace period so the click that opened capture mode
-            # isn't itself picked up
             if time.time() - self.capture_start_time > 0.25:
                 if is_key_pressed(VK_ESCAPE):
-                    self._finish_capture(None)  # cancel, keep old hotkey
+                    self._finish_capture(None)
                 else:
                     pressed_main = [vk for vk in MAIN_KEY_CANDIDATES if is_key_pressed(vk)]
                     if pressed_main:
@@ -435,89 +541,34 @@ class AutoClickerApp:
             if pressed and not self._hotkey_prev_state:
                 self._toggle()
             self._hotkey_prev_state = pressed
-
         self.root.after(30, self._poll_hotkey)
 
     # ----- theming -----
-    def _pick_color1(self):
-        c = colorchooser.askcolor(color=self.custom_g1)[1]
+    def _select_accent(self, color):
+        self.accent = color
+        self._apply_accent()
+
+    def _pick_custom_accent(self):
+        c = colorchooser.askcolor(color=self.accent)[1]
         if c:
-            self.custom_g1 = c
-            self.use_custom = True
-            self.theme_name.set("Custom...")
-            self._apply_theme()
+            self.accent = c
+            self._apply_accent()
 
-    def _pick_color2(self):
-        c = colorchooser.askcolor(color=self.custom_g2)[1]
-        if c:
-            self.custom_g2 = c
-            self.use_custom = True
-            self.theme_name.set("Custom...")
-            self._apply_theme()
-
-    def _on_theme_change(self):
-        self.use_custom = (self.theme_name.get() == "Custom...")
-        self._apply_theme()
-
-    def _apply_theme(self):
-        if self.use_custom or self.theme_name.get() == "Custom...":
-            g1, g2 = self.custom_g1, self.custom_g2
-            accent, fg = "#00c6ff", "#ffffff"
-        else:
-            t = THEMES[self.theme_name.get()]
-            g1, g2, accent, fg = t["g1"], t["g2"], t["accent"], t["fg"]
-
-        self._accent = accent
-        self._draw_gradient(g1, g2)
-
-        panel_bg = interpolate_color(g1, g2, 0.5)
-        r, g, b = hex_to_rgb(panel_bg)
-        panel_bg = rgb_to_hex((int(r * 0.55), int(g * 0.55), int(b * 0.55)))
-
-        self.content.configure(bg=panel_bg)
-        for widget in [self.title_label, self.hint_label]:
-            widget.configure(bg=panel_bg, fg=fg)
-        self.title_label.configure(fg=accent)
-
-        for w in self.content.winfo_children():
-            self._style_recursive(w, panel_bg, fg, accent)
-
-        self._refresh_status()
-        self.toggle_btn.configure(bg=accent, fg="#111111", activebackground=fg)
-
-    def _style_recursive(self, widget, bg, fg, accent):
-        cls = widget.winfo_class()
-        try:
-            if cls in ("Frame",):
-                widget.configure(bg=bg)
-            elif cls == "Label":
-                if widget is self.hotkey_display:
-                    widget.configure(bg="#ffffff", fg="#111111")
-                else:
-                    widget.configure(bg=bg, fg=fg)
-            elif cls == "Scale":
-                widget.configure(bg=bg, fg=fg, troughcolor=accent,
-                                  highlightbackground=bg, activebackground=accent)
-            elif cls == "Entry":
-                widget.configure(bg="#ffffff", fg="#111111", insertbackground="#111111")
-            elif cls == "Button" and widget is not self.toggle_btn:
-                widget.configure(bg=accent, fg="#111111", activebackground=fg)
-        except tk.TclError:
+    def _apply_accent(self):
+        self.logo_label.configure(fg=self.accent)
+        for title in [self.cps_title, self.cdc_title, self.mb_title, self.hk_title, self.theme_title]:
+            title.configure(fg=self.accent)
+        for rb in self.radio_buttons:
+            rb.configure(selectcolor="#1c1c25", fg=TEXT)
+            rb.configure(highlightbackground=self.accent)
+        for k, btn in self.nav_buttons.items():
             pass
-        for child in widget.winfo_children():
-            self._style_recursive(child, bg, fg, accent)
-
-    def _draw_gradient(self, c1, c2):
-        self.canvas.delete("gradient")
-        w, h = 460, 600
-        steps = 120
-        for i in range(steps):
-            t = i / steps
-            color = interpolate_color(c1, c2, t)
-            y0 = int(h * t)
-            y1 = int(h * (t + 1.0 / steps)) + 1
-            self.canvas.create_rectangle(0, y0, w, y1, outline="", fill=color, tags="gradient")
-        self.canvas.tag_lower("gradient")
+        # redraw swatch selection rings
+        for c in self.accent_swatch_canvases:
+            c.delete("ring")
+            if c.color == self.accent:
+                c.create_oval(1, 1, 39, 39, outline=self.accent, width=2, tags="ring")
+        self._refresh_status()
 
 
 def main():

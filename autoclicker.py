@@ -5,8 +5,8 @@ Features:
   - CPS (clicks per second) control
   - CDC (click duty cycle) control - the % of each click cycle the
     mouse button is held "down" vs "up"
-  - Toggle on/off with a global hotkey (default F6), works even when
-    the window isn't focused
+  - Fully custom hotkeys - click "Set Hotkey" and press any key or
+    key combo (e.g. Shift+R, Ctrl+Alt+F, etc.) to bind it
   - Customizable UI: pick from preset color themes, or choose your
     own two colors for a custom gradient background
 
@@ -95,12 +95,65 @@ def is_key_pressed(vk_code):
     return (user32.GetAsyncKeyState(vk_code) & 0x8000) != 0
 
 
-# Common virtual key codes for the hotkey dropdown
-VK_CODES = {
-    "F5": 0x74, "F6": 0x75, "F7": 0x76, "F8": 0x77,
-    "F9": 0x78, "F10": 0x79,
-    "` (Grave)": 0xC0,
-}
+# ---------------------------------------------------------------------------
+# Virtual key code map (for custom hotkey capture + display)
+# ---------------------------------------------------------------------------
+
+VK_SHIFT = 0x10
+VK_CONTROL = 0x11
+VK_MENU = 0x12  # Alt
+VK_ESCAPE = 0x1B
+
+MODIFIER_VKS = (VK_SHIFT, VK_CONTROL, VK_MENU)
+
+VK_NAMES = {}
+# Letters
+for i in range(26):
+    VK_NAMES[0x41 + i] = chr(ord('A') + i)
+# Digits
+for i in range(10):
+    VK_NAMES[0x30 + i] = str(i)
+# Function keys
+for i in range(1, 13):
+    VK_NAMES[0x6F + i] = f"F{i}"
+
+VK_NAMES.update({
+    VK_SHIFT: "Shift",
+    VK_CONTROL: "Ctrl",
+    VK_MENU: "Alt",
+    0x20: "Space",
+    0x09: "Tab",
+    0x0D: "Enter",
+    0x08: "Backspace",
+    0x14: "CapsLock",
+    VK_ESCAPE: "Esc",
+    0x25: "Left", 0x26: "Up", 0x27: "Right", 0x28: "Down",
+    0x2D: "Insert", 0x2E: "Delete", 0x24: "Home", 0x23: "End",
+    0x21: "PageUp", 0x22: "PageDown",
+    0xC0: "`",
+    0xBA: ";", 0xBB: "=", 0xBC: ",", 0xBD: "-", 0xBE: ".", 0xBF: "/",
+    0xDB: "[", 0xDC: "\\", 0xDD: "]", 0xDE: "'",
+})
+
+# Candidate keys scanned while capturing a new hotkey (non-modifier "main" keys)
+MAIN_KEY_CANDIDATES = [vk for vk in VK_NAMES.keys() if vk not in MODIFIER_VKS]
+
+
+def vk_name(vk):
+    return VK_NAMES.get(vk, f"VK{vk:#x}")
+
+
+def combo_to_string(combo):
+    if not combo:
+        return "None"
+    return " + ".join(vk_name(vk) for vk in combo)
+
+
+def is_combo_pressed(combo):
+    if not combo:
+        return False
+    return all(is_key_pressed(vk) for vk in combo)
+
 
 # ---------------------------------------------------------------------------
 # Color themes
@@ -187,23 +240,26 @@ class AutoClickerApp:
 
         self.cps_var = tk.DoubleVar(value=10.0)
         self.cdc_var = tk.DoubleVar(value=50.0)
-        self.hotkey_var = tk.StringVar(value="F6")
         self.button_var = tk.StringVar(value="Left")
 
+        # Hotkey state: default = F6 alone. Can be reset to any combo.
+        self.hotkey_combo = [0x75]  # F6
+        self.capturing_hotkey = False
+        self.capture_start_time = 0.0
+        self._hotkey_prev_state = False
+
         root.title("Auto Clicker")
-        root.geometry("460x560")
+        root.geometry("460x600")
         root.resizable(False, False)
 
-        self.canvas = tk.Canvas(root, width=460, height=560, highlightthickness=0)
+        self.canvas = tk.Canvas(root, width=460, height=600, highlightthickness=0)
         self.canvas.pack(fill="both", expand=True)
 
         self.content = tk.Frame(self.canvas, bg="#1c1c1c")
-        self.canvas.create_window(230, 280, window=self.content, width=420, height=520)
+        self.canvas.create_window(230, 300, window=self.content, width=420, height=560)
 
         self._build_ui()
         self._apply_theme()
-
-        self._hotkey_prev_state = False
         self._poll_hotkey()
 
     # ----- UI construction -----
@@ -249,26 +305,28 @@ class AutoClickerApp:
         self.cdc_entry.bind("<Return>", lambda e: self._set_cdc_from_entry())
         self.cdc_entry.bind("<FocusOut>", lambda e: self._set_cdc_from_entry())
 
-        # Mouse button + hotkey
+        # Mouse button
         opts_frame = tk.Frame(self.content)
         opts_frame.pack(fill="x", padx=24, pady=(10, 6))
-
-        btn_col = tk.Frame(opts_frame)
-        btn_col.pack(side="left", fill="x", expand=True)
-        self.button_title = tk.Label(btn_col, text="Mouse Button", font=("Segoe UI", 10, "bold"))
+        self.button_title = tk.Label(opts_frame, text="Mouse Button", font=("Segoe UI", 10, "bold"))
         self.button_title.pack(anchor="w")
-        self.button_menu = ttk.Combobox(btn_col, textvariable=self.button_var,
+        self.button_menu = ttk.Combobox(opts_frame, textvariable=self.button_var,
                                          values=["Left", "Right"], state="readonly", width=10)
         self.button_menu.pack(anchor="w", pady=(2, 0))
         self.button_menu.bind("<<ComboboxSelected>>", lambda e: self._sync_button())
 
-        key_col = tk.Frame(opts_frame)
-        key_col.pack(side="left", fill="x", expand=True)
-        self.hotkey_title = tk.Label(key_col, text="Toggle Hotkey", font=("Segoe UI", 10, "bold"))
+        # Hotkey (custom capture)
+        hotkey_frame = tk.Frame(self.content)
+        hotkey_frame.pack(fill="x", padx=24, pady=(10, 6))
+        self.hotkey_title = tk.Label(hotkey_frame, text="Toggle Hotkey", font=("Segoe UI", 10, "bold"))
         self.hotkey_title.pack(anchor="w")
-        self.hotkey_menu = ttk.Combobox(key_col, textvariable=self.hotkey_var,
-                                         values=list(VK_CODES.keys()), state="readonly", width=10)
-        self.hotkey_menu.pack(anchor="w", pady=(2, 0))
+        hotkey_row = tk.Frame(hotkey_frame)
+        hotkey_row.pack(fill="x", pady=(2, 0))
+        self.hotkey_display = tk.Label(hotkey_row, text=combo_to_string(self.hotkey_combo),
+                                        font=("Segoe UI", 11, "bold"), relief="groove", padx=10, pady=6)
+        self.hotkey_display.pack(side="left", fill="x", expand=True)
+        self.set_hotkey_btn = tk.Button(hotkey_row, text="Set Hotkey", command=self._begin_capture)
+        self.set_hotkey_btn.pack(side="left", padx=(8, 0))
 
         # Start/Stop button
         self.toggle_btn = tk.Button(self.content, text="START (or press hotkey)",
@@ -345,12 +403,39 @@ class AutoClickerApp:
             self.status_label.config(text="STOPPED", fg="#ff5555")
             self.toggle_btn.config(text="START (or press hotkey)")
 
+    # ----- hotkey capture -----
+    def _begin_capture(self):
+        self.capturing_hotkey = True
+        self.capture_start_time = time.time()
+        self.set_hotkey_btn.config(text="...", state="disabled")
+        self.hotkey_display.config(text="Press keys... (Esc to cancel)")
+
+    def _finish_capture(self, combo):
+        self.capturing_hotkey = False
+        if combo:
+            self.hotkey_combo = combo
+        self.hotkey_display.config(text=combo_to_string(self.hotkey_combo))
+        self.set_hotkey_btn.config(text="Set Hotkey", state="normal")
+
     def _poll_hotkey(self):
-        vk = VK_CODES.get(self.hotkey_var.get(), VK_CODES["F6"])
-        pressed = is_key_pressed(vk)
-        if pressed and not self._hotkey_prev_state:
-            self._toggle()
-        self._hotkey_prev_state = pressed
+        if self.capturing_hotkey:
+            # small grace period so the click that opened capture mode
+            # isn't itself picked up
+            if time.time() - self.capture_start_time > 0.25:
+                if is_key_pressed(VK_ESCAPE):
+                    self._finish_capture(None)  # cancel, keep old hotkey
+                else:
+                    pressed_main = [vk for vk in MAIN_KEY_CANDIDATES if is_key_pressed(vk)]
+                    if pressed_main:
+                        combo = [m for m in MODIFIER_VKS if is_key_pressed(m)]
+                        combo.append(pressed_main[0])
+                        self._finish_capture(combo)
+        else:
+            pressed = is_combo_pressed(self.hotkey_combo)
+            if pressed and not self._hotkey_prev_state:
+                self._toggle()
+            self._hotkey_prev_state = pressed
+
         self.root.after(30, self._poll_hotkey)
 
     # ----- theming -----
@@ -386,7 +471,6 @@ class AutoClickerApp:
         self._draw_gradient(g1, g2)
 
         panel_bg = interpolate_color(g1, g2, 0.5)
-        # darken slightly for readability
         r, g, b = hex_to_rgb(panel_bg)
         panel_bg = rgb_to_hex((int(r * 0.55), int(g * 0.55), int(b * 0.55)))
 
@@ -394,9 +478,6 @@ class AutoClickerApp:
         for widget in [self.title_label, self.hint_label]:
             widget.configure(bg=panel_bg, fg=fg)
         self.title_label.configure(fg=accent)
-
-        for frame in [self.content]:
-            pass
 
         for w in self.content.winfo_children():
             self._style_recursive(w, panel_bg, fg, accent)
@@ -410,7 +491,10 @@ class AutoClickerApp:
             if cls in ("Frame",):
                 widget.configure(bg=bg)
             elif cls == "Label":
-                widget.configure(bg=bg, fg=fg)
+                if widget is self.hotkey_display:
+                    widget.configure(bg="#ffffff", fg="#111111")
+                else:
+                    widget.configure(bg=bg, fg=fg)
             elif cls == "Scale":
                 widget.configure(bg=bg, fg=fg, troughcolor=accent,
                                   highlightbackground=bg, activebackground=accent)
@@ -425,7 +509,7 @@ class AutoClickerApp:
 
     def _draw_gradient(self, c1, c2):
         self.canvas.delete("gradient")
-        w, h = 460, 560
+        w, h = 460, 600
         steps = 120
         for i in range(steps):
             t = i / steps

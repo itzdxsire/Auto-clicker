@@ -217,6 +217,7 @@ class AutoClickerApp:
         self.capturing_hotkey = False
         self.capture_start_time = 0.0
         self._hotkey_prev_state = False
+        self.trigger_mode = "Toggle"  # or "Hold"
 
         self.accent_swatch_canvases = []
 
@@ -227,6 +228,7 @@ class AutoClickerApp:
 
         self._build_layout()
         self._show_page("main")
+        self._style_mode_buttons()
         self._apply_accent()
         self._poll_hotkey()
 
@@ -391,6 +393,22 @@ class AutoClickerApp:
                                          command=self._begin_capture)
         self.set_hotkey_btn.pack(fill="x", ipady=6)
 
+        mode_label = tk.Label(hk_row, text="Trigger Mode", bg=CARD_BG, fg=SUBTEXT,
+                               font=("Segoe UI", 9, "bold"))
+        mode_label.pack(anchor="w", pady=(14, 4))
+        mode_row = tk.Frame(hk_row, bg=CARD_BG)
+        mode_row.pack(fill="x")
+        self.toggle_mode_btn = tk.Button(mode_row, text="Toggle", relief="flat", bd=0,
+                                          font=("Segoe UI", 10, "bold"),
+                                          command=lambda: self._set_trigger_mode("Toggle"))
+        self.toggle_mode_btn.pack(side="left", fill="x", expand=True, padx=(0, 4), ipady=6)
+        self.hold_mode_btn = tk.Button(mode_row, text="Hold", relief="flat", bd=0,
+                                        font=("Segoe UI", 10, "bold"),
+                                        command=lambda: self._set_trigger_mode("Hold"))
+        self.hold_mode_btn.pack(side="left", fill="x", expand=True, padx=(4, 0), ipady=6)
+        tk.Label(hk_row, text="Toggle: press once to start, again to stop.\nHold: clicks only while the key is held down.",
+                 bg=CARD_BG, fg=SUBTEXT, font=("Segoe UI", 8), justify="left").pack(anchor="w", pady=(8, 0))
+
         # --- theme card ---
         theme_card = card(page)
         theme_card.pack(fill="x", padx=pad, pady=(12, pad))
@@ -482,20 +500,40 @@ class AutoClickerApp:
         else:
             self._start_clicking()
 
+    def _set_trigger_mode(self, mode):
+        self.trigger_mode = mode
+        self.engine.enabled = False
+        self._style_mode_buttons()
+        self._refresh_status()
+
+    def _style_mode_buttons(self):
+        if self.trigger_mode == "Toggle":
+            self.toggle_mode_btn.config(bg=self.accent, fg="#ffffff")
+            self.hold_mode_btn.config(bg="#24242e", fg=SUBTEXT)
+        else:
+            self.hold_mode_btn.config(bg=self.accent, fg="#ffffff")
+            self.toggle_mode_btn.config(bg="#24242e", fg=SUBTEXT)
+
     def _refresh_status(self):
         hk = combo_to_string(self.hotkey_combo)
         self.start_btn.config(text=f"\u25B6  Start ({hk})")
         self.stop_btn.config(text=f"\u25A0  Stop ({hk})")
+        hold_mode = (self.trigger_mode == "Hold")
         if self.engine.enabled:
             self.status_value_label.config(text="Running", fg=self.accent)
-            self.status_sub_label.config(text="Press your hotkey to stop clicking")
+            sub = f"Holding {hk} to keep clicking" if hold_mode else "Press your hotkey to stop clicking"
+            self.status_sub_label.config(text=sub)
             self.start_btn.config(bg="#24242e", fg=SUBTEXT, state="normal")
             self.stop_btn.config(bg=self.accent, fg="#ffffff")
         else:
             self.status_value_label.config(text="Stopped", fg=STOPPED_RED)
-            self.status_sub_label.config(text="Press your hotkey to start clicking")
+            sub = f"Hold {hk} to click" if hold_mode else "Press your hotkey to start clicking"
+            self.status_sub_label.config(text=sub)
             self.start_btn.config(bg=self.accent, fg="#ffffff")
             self.stop_btn.config(bg="#24242e", fg=SUBTEXT)
+        state = "disabled" if hold_mode else "normal"
+        self.start_btn.config(state=state)
+        self.stop_btn.config(state=state)
         self._draw_status_ring()
 
     def _draw_status_ring(self):
@@ -538,8 +576,13 @@ class AutoClickerApp:
                         self._finish_capture(combo)
         else:
             pressed = is_combo_pressed(self.hotkey_combo)
-            if pressed and not self._hotkey_prev_state:
-                self._toggle()
+            if self.trigger_mode == "Hold":
+                if pressed != self.engine.enabled:
+                    self.engine.enabled = pressed
+                    self._refresh_status()
+            else:  # Toggle
+                if pressed and not self._hotkey_prev_state:
+                    self._toggle()
             self._hotkey_prev_state = pressed
         self.root.after(30, self._poll_hotkey)
 

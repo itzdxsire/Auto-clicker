@@ -96,6 +96,7 @@ def is_key_pressed(vk_code):
 # ---------------------------------------------------------------------------
 
 VK_SHIFT, VK_CONTROL, VK_MENU, VK_ESCAPE = 0x10, 0x11, 0x12, 0x1B
+VK_XBUTTON1, VK_XBUTTON2, VK_MBUTTON = 0x05, 0x06, 0x04
 MODIFIER_VKS = (VK_SHIFT, VK_CONTROL, VK_MENU)
 
 VK_NAMES = {}
@@ -114,6 +115,9 @@ VK_NAMES.update({
     0x21: "PageUp", 0x22: "PageDown", 0xC0: "`",
     0xBA: ";", 0xBB: "=", 0xBC: ",", 0xBD: "-", 0xBE: ".", 0xBF: "/",
     0xDB: "[", 0xDC: "\\", 0xDD: "]", 0xDE: "'",
+    VK_MBUTTON: "Mouse 3 (Middle)",
+    VK_XBUTTON1: "Mouse 4 (Back)",
+    VK_XBUTTON2: "Mouse 5 (Forward)",
 })
 MAIN_KEY_CANDIDATES = [vk for vk in VK_NAMES if vk not in MODIFIER_VKS]
 
@@ -393,6 +397,8 @@ class AutoClickerApp:
                                          bg="#24242e", fg=TEXT, font=("Segoe UI", 10),
                                          command=self._begin_capture)
         self.set_hotkey_btn.pack(fill="x", ipady=6)
+        tk.Label(hk_row, text="Works with keyboard keys or side mouse buttons\n(Mouse 4 / Mouse 5).",
+                 bg=CARD_BG, fg=SUBTEXT, font=("Segoe UI", 8), justify="left").pack(anchor="w", pady=(6, 0))
 
         mode_label = tk.Label(hk_row, text="Trigger Mode", bg=CARD_BG, fg=SUBTEXT,
                                font=("Segoe UI", 9, "bold"))

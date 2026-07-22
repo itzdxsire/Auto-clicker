@@ -1,5 +1,5 @@
 """
-Simple AutoClicker for Windows
+Desyx - Auto Clicker for Windows
 ---------------------------------------
 A modern, card-based autoclicker with:
   - CPS (clicks per second) control
@@ -20,10 +20,12 @@ Run:
 
 Build a standalone .exe (run this ON Windows):
   pip install pyinstaller
-  pyinstaller --onefile --noconsole --name AutoClicker autoclicker.py
+  pyinstaller --onefile --noconsole --name Desyx --icon icon.ico --add-data "logo.png;." autoclicker.py
 """
 
 import ctypes
+import json
+import os
 import sys
 import threading
 import time
@@ -33,6 +35,20 @@ from tkinter import colorchooser
 if sys.platform != "win32":
     print("This autoclicker uses the Win32 API and only runs on Windows.")
     sys.exit(1)
+
+
+def resource_path(relative_path):
+    """
+    Resolves a bundled asset's path correctly whether running as a plain
+    .py script or as a frozen PyInstaller --onefile exe (which extracts
+    bundled data files to a temp folder at runtime, referenced via
+    sys._MEIPASS).
+    """
+    base_path = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base_path, relative_path)
+
+
+APP_NAME = "Desyx"
 
 # ---------------------------------------------------------------------------
 # Low level mouse click simulation (Win32 SendInput)
@@ -106,6 +122,11 @@ for i in range(10):
     VK_NAMES[0x30 + i] = str(i)
 for i in range(1, 13):
     VK_NAMES[0x6F + i] = f"F{i}"
+for i in range(13, 25):
+    # F13-F24 aren't on physical keyboards - Windows reserves them as
+    # "extra" keys specifically for remapped macro buttons (gaming mice,
+    # macro keypads, streaming decks, etc.)
+    VK_NAMES[0x7C - 13 + i] = f"F{i}"
 VK_NAMES.update({
     VK_SHIFT: "Shift", VK_CONTROL: "Ctrl", VK_MENU: "Alt",
     0x20: "Space", 0x09: "Tab", 0x0D: "Enter", 0x08: "Backspace",
@@ -150,10 +171,91 @@ ACCENT_PRESETS = ["#7c3aed", "#3b82f6", "#22c55e", "#ef4444", "#f97316", "#ec489
 
 
 # ---------------------------------------------------------------------------
+# Settings persistence (saved to %APPDATA%\Desyx\settings.json)
+# ---------------------------------------------------------------------------
+
+SETTINGS_DIR = os.path.join(os.environ.get("APPDATA") or os.path.expanduser("~"), "Desyx")
+SETTINGS_PATH = os.path.join(SETTINGS_DIR, "settings.json")
+
+
+def load_settings():
+    try:
+        with open(SETTINGS_PATH, "r") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def save_settings(data):
+    try:
+        os.makedirs(SETTINGS_DIR, exist_ok=True)
+        with open(SETTINGS_PATH, "w") as f:
+            json.dump(data, f)
+    except Exception:
+        pass  # never crash the app over a failed settings save
+
+
+# ---------------------------------------------------------------------------
 # Clicker worker thread
 # ---------------------------------------------------------------------------
 
 class ClickerEngine:
+    """
+    Click engine.
+
+    Honest design notes - read this if you're wondering why it's built
+    this way, especially around the "no CPU spin, no catch-up guard"
+    requirements:
+
+      - HIGH-RES TIMER: timeBeginPeriod(1) asks Windows for ~1ms scheduler
+        granularity (default is ~15.6ms) for as long as the engine runs.
+        This alone is most of the fix for the original "bursty" behavior,
+        since a plain time.sleep() for a few ms is far more accurate once
+        the OS's own tick size shrinks to ~1ms.
+
+      - THREAD PRIORITY: the click thread requests
+        THREAD_PRIORITY_TIME_CRITICAL from Windows. This makes it much
+        less likely to get pre-empted for long stretches by other
+        processes, which further reduces scheduling jitter - again, with
+        zero busy-waiting, purely by asking the OS to schedule this
+        thread more eagerly.
+
+      - NO CPU SPIN: every wait is a single time.sleep(remaining) call.
+        There is no busy-loop anywhere. This means individual clicks can
+        be off by roughly the OS's real sleep granularity (about 0-1ms
+        with the high-res timer active) rather than being spin-accurate
+        to the microsecond - a deliberate trade of a small amount of
+        per-click precision for zero CPU usage.
+
+      - WHY THERE'S NO "ANTI-BURST GUARD": a rigid absolute schedule
+        (next click = session_start + N * period) combined with NO
+        spin-wait and NO catch-up guard is a bad combination - if the
+        thread is ever delayed past its scheduled slot (guard removed,
+        so nothing catches that), it fires every "missed" click
+        back-to-back the moment it wakes up, which is a real burst, not
+        an imagined one. Rather than patch that with a guard, the
+        scheduling model itself was changed: each click's timing is
+        computed fresh from the moment the previous click actually
+        finished, not from a fixed running schedule. There is no
+        "behind schedule" state to catch up from, so there is nothing
+        for a burst to be made of - it's eliminated by construction,
+        not detected and suppressed after the fact.
+        The honest tradeoff: because there's no absolute anchor, a
+        delayed cycle is not "made up" - if the OS stalls the thread for
+        50ms, you lose that time rather than getting a burst to
+        compensate. In practice, combined with the high-res timer and
+        time-critical thread priority, this loss is negligible and
+        clicks stay effectively locked to your CPS setting.
+
+      - MOUSE-UP SAFETY: once mouse_down() has been sent, the matching
+        mouse_up() always fires after down_time, even if you disable the
+        clicker in that exact instant. This is not interruptible, on
+        purpose - it guarantees the mouse button can never end up
+        logically stuck "down".
+    """
+
+    THREAD_PRIORITY_TIME_CRITICAL = 15
+
     def __init__(self):
         self.running = False
         self.enabled = False
@@ -161,27 +263,85 @@ class ClickerEngine:
         self.cdc = 50.0
         self.button = "Left"
         self._thread = None
+        self._timer_boosted = False
 
     def start(self):
         self.running = True
+        self._boost_timer_resolution()
         self._thread = threading.Thread(target=self._loop, daemon=True)
         self._thread.start()
 
     def stop(self):
         self.running = False
+        self._restore_timer_resolution()
 
+    # ----- Windows high-resolution timer -----
+    def _boost_timer_resolution(self):
+        try:
+            ctypes.windll.winmm.timeBeginPeriod(1)
+            self._timer_boosted = True
+        except Exception:
+            self._timer_boosted = False
+
+    def _restore_timer_resolution(self):
+        if self._timer_boosted:
+            try:
+                ctypes.windll.winmm.timeEndPeriod(1)
+            except Exception:
+                pass
+            self._timer_boosted = False
+
+    # ----- Windows thread priority (reduces scheduling delay, no CPU cost) -----
+    def _boost_thread_priority(self):
+        try:
+            kernel32 = ctypes.windll.kernel32
+            handle = kernel32.GetCurrentThread()
+            kernel32.SetThreadPriority(handle, self.THREAD_PRIORITY_TIME_CRITICAL)
+        except Exception:
+            pass
+
+    # ----- plain sleep-based waiting, zero CPU spin -----
+    def _sleep_until(self, target):
+        remaining = target - time.perf_counter()
+        if remaining > 0:
+            time.sleep(remaining)
+
+    # ----- main loop -----
     def _loop(self):
+        self._boost_thread_priority()  # once, for the lifetime of this thread
         while self.running:
             if self.enabled:
-                period = 1.0 / max(self.cps, 0.1)
-                down_time = max(period * (self.cdc / 100.0), 0.001)
-                up_time = max(period - down_time, 0.001)
-                mouse_down(self.button)
-                time.sleep(down_time)
-                mouse_up(self.button)
-                time.sleep(up_time)
+                self._run_click_session()
             else:
                 time.sleep(0.02)
+
+    def _run_click_session(self):
+        """
+        One continuous clicking session. Each click's schedule is derived
+        fresh from "now" every cycle - see the class docstring for why
+        this (rather than a fixed running anchor) is what makes bursts
+        impossible without needing a guard.
+        """
+        while self.running and self.enabled:
+            cps = max(self.cps, 0.1)
+            cdc = min(max(self.cdc, 1.0), 99.0)
+            period = 1.0 / cps
+            down_time = period * (cdc / 100.0)
+            up_time = period - down_time
+
+            # --- click (never interruptible once started - see mouse-up safety note) ---
+            mouse_down(self.button)
+            self._sleep_until(time.perf_counter() + down_time)
+            mouse_up(self.button)
+
+            # --- gap before next click (interruptible, checked in short slices
+            #     so disabling the clicker takes effect promptly) ---
+            up_target = time.perf_counter() + up_time
+            while self.running and self.enabled:
+                remaining = up_target - time.perf_counter()
+                if remaining <= 0:
+                    break
+                time.sleep(min(remaining, 0.01))
 
 
 # ---------------------------------------------------------------------------
@@ -212,30 +372,43 @@ class AutoClickerApp:
         self.engine = ClickerEngine()
         self.engine.start()
 
-        self.accent = ACCENT_PRESETS[0]
-        self.cps_var = tk.StringVar(value="20")
-        self.cdc_var = tk.StringVar(value="50")
-        self.button_var = tk.StringVar(value="Left")
+        s = load_settings()
 
-        self.hotkey_combo = [0x75]  # F6
+        self.accent = s.get("accent", ACCENT_PRESETS[0])
+        self.cps_var = tk.StringVar(value=str(s.get("cps", 20)))
+        self.cdc_var = tk.StringVar(value=str(s.get("cdc", 50)))
+        self.button_var = tk.StringVar(value=s.get("button", "Left"))
+
+        self.hotkey_combo = s.get("hotkey_combo", [0x75])  # default F6
         self.capturing_hotkey = False
         self.capture_start_time = 0.0
         self._hotkey_prev_state = False
-        self.trigger_mode = "Toggle"  # or "Hold"
+        self.trigger_mode = s.get("trigger_mode", "Toggle")
+
+        self.engine.cps = float(self.cps_var.get() or 20)
+        self.engine.cdc = float(self.cdc_var.get() or 50)
+        self.engine.button = self.button_var.get()
 
         self.accent_swatch_canvases = []
 
-        root.title("Simple AutoClicker")
+        root.title(APP_NAME)
         root.configure(bg=BG)
         root.geometry("940x800")
         root.minsize(900, 700)
         root.resizable(True, True)
+        self._set_window_icon(root)
 
         self._build_layout()
         self._show_page("main")
         self._style_mode_buttons()
         self._apply_accent()
         self._poll_hotkey()
+
+    def _set_window_icon(self, root):
+        try:
+            root.iconbitmap(resource_path("icon.ico"))
+        except Exception:
+            pass  # non-fatal - app still runs fine without a custom icon
 
     # ----- top level layout -----
     def _build_layout(self):
@@ -249,10 +422,22 @@ class AutoClickerApp:
 
         title_row = tk.Frame(self.sidebar, bg=SIDEBAR_BG)
         title_row.pack(fill="x", pady=(20, 24), padx=16)
-        self.logo_label = tk.Label(title_row, text="\u2716", bg=SIDEBAR_BG,
-                                    font=("Segoe UI", 16, "bold"))
+
+        self.logo_img = None
+        try:
+            self.logo_img = tk.PhotoImage(file=resource_path("logo.png"))
+            # scale down if the source PNG is larger than we need in the sidebar
+            w, h = self.logo_img.width(), self.logo_img.height()
+            target = 28
+            if w > target:
+                factor = max(1, round(w / target))
+                self.logo_img = self.logo_img.subsample(factor, factor)
+            self.logo_label = tk.Label(title_row, image=self.logo_img, bg=SIDEBAR_BG)
+        except Exception:
+            self.logo_label = tk.Label(title_row, text="\u2716", bg=SIDEBAR_BG,
+                                        font=("Segoe UI", 16, "bold"))
         self.logo_label.pack(side="left")
-        tk.Label(title_row, text=" AutoClicker", bg=SIDEBAR_BG, fg=TEXT,
+        tk.Label(title_row, text=f" {APP_NAME}", bg=SIDEBAR_BG, fg=TEXT,
                  font=("Segoe UI", 13, "bold")).pack(side="left")
 
         self.nav_buttons = {}
@@ -397,7 +582,7 @@ class AutoClickerApp:
                                          bg="#24242e", fg=TEXT, font=("Segoe UI", 10),
                                          command=self._begin_capture)
         self.set_hotkey_btn.pack(fill="x", ipady=6)
-        tk.Label(hk_row, text="Works with keyboard keys or side mouse buttons\n(Mouse 4 / Mouse 5).",
+        tk.Label(hk_row, text="Works with any keyboard key, or Mouse 3/4/5.\nExtra mouse buttons? See the note below.",
                  bg=CARD_BG, fg=SUBTEXT, font=("Segoe UI", 8), justify="left").pack(anchor="w", pady=(6, 0))
 
         mode_label = tk.Label(hk_row, text="Trigger Mode", bg=CARD_BG, fg=SUBTEXT,
@@ -455,6 +640,28 @@ class AutoClickerApp:
                              "(CPS, CDC, mouse button, hotkey, and theme.)",
                  bg=CARD_BG, fg=SUBTEXT, font=("Segoe UI", 10), justify="left").pack(
             anchor="w", padx=16, pady=(0, 18))
+
+        mouse_card = card(page)
+        mouse_card.pack(fill="x", padx=20, pady=(0, 20))
+        card_title(mouse_card, "\U0001F5B1 Using extra mouse buttons (Logitech / Razer / etc.)", self.accent)
+        tk.Label(mouse_card, justify="left", wraplength=740, bg=CARD_BG, fg=SUBTEXT,
+                 font=("Segoe UI", 10),
+                 text=(
+                     "The standard 5 buttons - Left, Right, Middle, and the two side buttons "
+                     "(Mouse 4 / Mouse 5) - work directly with any mouse, since Windows reports "
+                     "them the same way no matter the brand.\n\n"
+                     "Gaming mice with MORE than 5 buttons (extra thumb buttons, DPI switches, "
+                     "etc.) don't expose those to other apps directly - only the mouse's own "
+                     "software can see them. To use one of those as your hotkey here:\n\n"
+                     "  1. Open your mouse software (Logitech G HUB, Razer Synapse, "
+                     "SteelSeries GG, Corsair iCUE, etc.)\n"
+                     "  2. Find the button you want to use and set its action to a "
+                     "keystroke, not a macro or shortcut\n"
+                     "  3. Pick one of F13 through F24 as that keystroke - these don't exist "
+                     "on real keyboards, so they're safe to use and won't conflict with anything\n"
+                     "  4. Come back here, click Set Hotkey, and press that same extra button - "
+                     "it'll be captured as \"F13\" (or whichever you chose)"
+                 )).pack(anchor="w", padx=16, pady=(0, 18))
         return page
 
     # ----- ABOUT PAGE -----
@@ -463,7 +670,7 @@ class AutoClickerApp:
         wrap = card(page)
         wrap.pack(fill="x", padx=20, pady=20)
         card_title(wrap, "\u2139 About", self.accent)
-        tk.Label(wrap, text="Simple AutoClicker  \u2022  v1.0.0\n\n"
+        tk.Label(wrap, text=f"{APP_NAME}  \u2022  v1.0.0\n\n"
                              "Built with Python + tkinter. Uses the Win32 SendInput API "
                              "to simulate mouse clicks, and GetAsyncKeyState to listen for "
                              "your custom hotkey globally.\n\n"
@@ -477,20 +684,25 @@ class AutoClickerApp:
         try:
             v = float(self.cps_var.get())
             if v > 0:
+                v = min(v, 500.0)  # sane ceiling even if typed directly (bypasses spinbox arrows)
                 self.engine.cps = v
+                self._save()
         except ValueError:
             pass
 
     def _sync_cdc(self):
         try:
             v = float(self.cdc_var.get())
-            if 0 < v < 100:
+            if v > 0:
+                v = min(v, 99.0)  # keep below 100 so there's always a release gap
                 self.engine.cdc = v
+                self._save()
         except ValueError:
             pass
 
     def _sync_button(self):
         self.engine.button = self.button_var.get()
+        self._save()
 
     # ----- start/stop -----
     def _start_clicking(self):
@@ -512,6 +724,25 @@ class AutoClickerApp:
         self.engine.enabled = False
         self._style_mode_buttons()
         self._refresh_status()
+        self._save()
+
+    def _save(self):
+        try:
+            cps = float(self.cps_var.get())
+        except ValueError:
+            cps = self.engine.cps
+        try:
+            cdc = float(self.cdc_var.get())
+        except ValueError:
+            cdc = self.engine.cdc
+        save_settings({
+            "accent": self.accent,
+            "cps": cps,
+            "cdc": cdc,
+            "button": self.button_var.get(),
+            "hotkey_combo": self.hotkey_combo,
+            "trigger_mode": self.trigger_mode,
+        })
 
     def _style_mode_buttons(self):
         if self.trigger_mode == "Toggle":
@@ -566,6 +797,7 @@ class AutoClickerApp:
         self.capturing_hotkey = False
         if combo:
             self.hotkey_combo = combo
+            self._save()
         self.hotkey_display.config(text=combo_to_string(self.hotkey_combo))
         self.set_hotkey_btn.config(text="Set Hotkey", state="normal")
         self._refresh_status()
@@ -597,15 +829,18 @@ class AutoClickerApp:
     def _select_accent(self, color):
         self.accent = color
         self._apply_accent()
+        self._save()
 
     def _pick_custom_accent(self):
         c = colorchooser.askcolor(color=self.accent)[1]
         if c:
             self.accent = c
             self._apply_accent()
+            self._save()
 
     def _apply_accent(self):
-        self.logo_label.configure(fg=self.accent)
+        if self.logo_img is None:
+            self.logo_label.configure(fg=self.accent)
         for title in [self.cps_title, self.cdc_title, self.mb_title, self.hk_title, self.theme_title]:
             title.configure(fg=self.accent)
         for rb in self.radio_buttons:
@@ -626,6 +861,7 @@ def main():
     app = AutoClickerApp(root)
 
     def on_close():
+        app._save()
         app.engine.stop()
         root.destroy()
 

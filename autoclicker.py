@@ -223,8 +223,9 @@ class AutoClickerApp:
 
         root.title("Simple AutoClicker")
         root.configure(bg=BG)
-        root.geometry("900x640")
-        root.resizable(False, False)
+        root.geometry("940x800")
+        root.minsize(900, 700)
+        root.resizable(True, True)
 
         self._build_layout()
         self._show_page("main")

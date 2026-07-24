@@ -30,11 +30,20 @@ import sys
 import threading
 import time
 import tkinter as tk
+from ctypes import wintypes
 from tkinter import colorchooser
 
 if sys.platform != "win32":
     print("This autoclicker uses the Win32 API and only runs on Windows.")
     sys.exit(1)
+
+from license import LicenseGate, get_hwid
+
+# Run "Desyx.exe --hwid" (or "python autoclicker.py --hwid") to print your
+# HWID code, then send that code to the developer to get access.
+if "--hwid" in sys.argv:
+    print(get_hwid())
+    sys.exit(0)
 
 
 def resource_path(relative_path):
@@ -65,8 +74,16 @@ class MouseInput(ctypes.Structure):
     ]
 
 
+class KeybdInput(ctypes.Structure):
+    _fields_ = [
+        ("wVk", ctypes.c_ushort), ("wScan", ctypes.c_ushort),
+        ("dwFlags", ctypes.c_ulong), ("time", ctypes.c_ulong),
+        ("dwExtraInfo", PUL),
+    ]
+
+
 class InputUnion(ctypes.Union):
-    _fields_ = [("mi", MouseInput)]
+    _fields_ = [("mi", MouseInput), ("ki", KeybdInput)]
 
 
 class Input(ctypes.Structure):
@@ -74,14 +91,18 @@ class Input(ctypes.Structure):
 
 
 INPUT_MOUSE = 0
+INPUT_KEYBOARD = 1
 MOUSEEVENTF_LEFTDOWN = 0x0002
 MOUSEEVENTF_LEFTUP = 0x0004
 MOUSEEVENTF_RIGHTDOWN = 0x0008
 MOUSEEVENTF_RIGHTUP = 0x0010
 MOUSEEVENTF_MIDDLEDOWN = 0x0020
 MOUSEEVENTF_MIDDLEUP = 0x0040
+KEYEVENTF_EXTENDEDKEY = 0x0001
+KEYEVENTF_KEYUP = 0x0002
 
 user32 = ctypes.windll.user32
+kernel32 = ctypes.windll.kernel32
 
 DOWN_FLAGS = {"Left": MOUSEEVENTF_LEFTDOWN, "Right": MOUSEEVENTF_RIGHTDOWN, "Middle": MOUSEEVENTF_MIDDLEDOWN}
 UP_FLAGS = {"Left": MOUSEEVENTF_LEFTUP, "Right": MOUSEEVENTF_RIGHTUP, "Middle": MOUSEEVENTF_MIDDLEUP}
@@ -105,6 +126,20 @@ def mouse_up(button="Left"):
 
 def is_key_pressed(vk_code):
     return (user32.GetAsyncKeyState(vk_code) & 0x8000) != 0
+
+
+def send_key(vk_code, key_down, extended=False):
+    """Injects a synthetic keyboard event via SendInput. Used by SOCD to
+    cancel the losing key's output / resume it later - never to send keys
+    that weren't already physically involved."""
+    flags = 0 if key_down else KEYEVENTF_KEYUP
+    if extended:
+        flags |= KEYEVENTF_EXTENDEDKEY
+    extra = ctypes.c_ulong(0)
+    ii = InputUnion()
+    ii.ki = KeybdInput(vk_code, 0, flags, 0, ctypes.pointer(extra))
+    inp = Input(INPUT_KEYBOARD, ii)
+    user32.SendInput(1, ctypes.pointer(inp), ctypes.sizeof(inp))
 
 
 # ---------------------------------------------------------------------------
@@ -153,6 +188,171 @@ def combo_to_string(combo):
 
 def is_combo_pressed(combo):
     return bool(combo) and all(is_key_pressed(vk) for vk in combo)
+
+
+# ---------------------------------------------------------------------------
+# SOCD (Simultaneous Opposing Cardinal Directions) resolution
+# ---------------------------------------------------------------------------
+#
+# Mode: "last input wins" - like most fighting-game controllers / SOCD-
+# cleaning keyboards. When two opposite keys (e.g. A/D) are held together,
+# whichever one was pressed most recently is the one that's actually "down"
+# from the game's perspective; the other is synthetically released until
+# it's the only one still held, at which point it resumes.
+
+VK_W, VK_A, VK_S, VK_D = 0x57, 0x41, 0x53, 0x44
+VK_LEFT, VK_UP, VK_RIGHT, VK_DOWN = 0x25, 0x26, 0x27, 0x28
+EXTENDED_VKS = {VK_LEFT, VK_UP, VK_RIGHT, VK_DOWN}
+
+
+class SOCDEngine:
+    """Tracks physical key state for opposing pairs and decides, on every
+    key event, whether the real event should be suppressed and/or whether
+    a synthetic event needs to be injected for the other key in the pair.
+    Thread-safe enough for this use case: all calls come from the single
+    hook thread, single-threaded by construction."""
+
+    def __init__(self):
+        self.enabled = False
+        self.mode = "wasd"  # "wasd" or "every" (adds arrow keys)
+        self.opposite = {}
+        self.physical = {}
+        self.active = {}  # pair key (min_vk, max_vk) -> currently "winning" vk, or None
+        self._rebuild_pairs()
+
+    def _rebuild_pairs(self):
+        pairs = [(VK_A, VK_D), (VK_W, VK_S)]
+        if self.mode == "every":
+            pairs += [(VK_LEFT, VK_RIGHT), (VK_UP, VK_DOWN)]
+        self.opposite = {}
+        self.active = {}
+        for a, b in pairs:
+            self.opposite[a] = b
+            self.opposite[b] = a
+            self.active[(min(a, b), max(a, b))] = None
+        self.physical = {vk: False for vk in self.opposite}
+
+    def set_mode(self, mode):
+        if mode not in ("wasd", "every"):
+            return
+        self.mode = mode
+        self._rebuild_pairs()
+
+    def _pair_key(self, vk):
+        opp = self.opposite[vk]
+        return (min(vk, opp), max(vk, opp))
+
+    def handle_key_event(self, vk, is_down):
+        """Call for every real (non-injected) key event. Returns True if
+        the caller should swallow/suppress this real event."""
+        if not self.enabled or vk not in self.opposite:
+            return False
+
+        opp = self.opposite[vk]
+        pkey = self._pair_key(vk)
+
+        if is_down:
+            self.physical[vk] = True
+            if self.active[pkey] == opp:
+                # opposite key currently winning -> this new press overrides it
+                send_key(opp, False, extended=opp in EXTENDED_VKS)
+            self.active[pkey] = vk
+            return False  # let this real keydown through as normal
+
+        # key-up
+        self.physical[vk] = False
+        if self.active[pkey] == vk:
+            if self.physical.get(opp):
+                # opposite key is still physically held -> resume its output
+                self.active[pkey] = opp
+                send_key(opp, True, extended=opp in EXTENDED_VKS)
+            else:
+                self.active[pkey] = None
+            return False  # let this real keyup through as normal
+        else:
+            # this key's output was never sent (it lost), so its release
+            # should be swallowed too - there's nothing to release
+            return True
+
+
+WH_KEYBOARD_LL = 13
+WM_KEYDOWN = 0x0100
+WM_KEYUP = 0x0101
+WM_SYSKEYDOWN = 0x0104
+WM_SYSKEYUP = 0x0105
+WM_QUIT = 0x0012
+LLKHF_INJECTED = 0x10
+
+
+class KBDLLHOOKSTRUCT(ctypes.Structure):
+    _fields_ = [
+        ("vkCode", ctypes.c_ulong),
+        ("scanCode", ctypes.c_ulong),
+        ("flags", ctypes.c_ulong),
+        ("time", ctypes.c_ulong),
+        ("dwExtraInfo", ctypes.c_void_p),
+    ]
+
+
+LowLevelKeyboardProc = ctypes.WINFUNCTYPE(
+    ctypes.c_long, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM
+)
+
+user32.SetWindowsHookExA.restype = ctypes.c_void_p
+user32.SetWindowsHookExA.argtypes = [ctypes.c_int, LowLevelKeyboardProc, ctypes.c_void_p, ctypes.c_uint32]
+user32.CallNextHookEx.restype = ctypes.c_long
+user32.CallNextHookEx.argtypes = [ctypes.c_void_p, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM]
+user32.UnhookWindowsHookEx.argtypes = [ctypes.c_void_p]
+kernel32.GetModuleHandleW.restype = ctypes.c_void_p
+
+
+class SOCDHook:
+    """
+    Installs a WH_KEYBOARD_LL hook on its own dedicated thread. A low-level
+    hook only receives events on the thread that installed it, and that
+    thread must pump a real Win32 message loop (GetMessage/DispatchMessage)
+    for Windows to deliver them - so this runs completely independently of
+    tkinter's mainloop rather than trying to piggyback on it.
+    """
+
+    def __init__(self, socd_engine):
+        self.engine = socd_engine
+        self._thread = None
+        self._thread_id = None
+        self._hook_handle = None
+        self._proc = LowLevelKeyboardProc(self._hook_proc)  # must keep a reference alive
+
+    def start(self):
+        if self._thread is not None:
+            return
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        if self._thread_id:
+            user32.PostThreadMessageW(self._thread_id, WM_QUIT, 0, 0)
+
+    def _run(self):
+        self._thread_id = kernel32.GetCurrentThreadId()
+        hmod = kernel32.GetModuleHandleW(None)
+        self._hook_handle = user32.SetWindowsHookExA(WH_KEYBOARD_LL, self._proc, hmod, 0)
+        msg = wintypes.MSG()
+        while True:
+            ret = user32.GetMessageW(ctypes.byref(msg), None, 0, 0)
+            if ret == 0 or ret == -1:
+                break
+        if self._hook_handle:
+            user32.UnhookWindowsHookEx(self._hook_handle)
+            self._hook_handle = None
+
+    def _hook_proc(self, nCode, wParam, lParam):
+        if nCode == 0:
+            kb = ctypes.cast(lParam, ctypes.POINTER(KBDLLHOOKSTRUCT)).contents
+            if not (kb.flags & LLKHF_INJECTED) and wParam in (WM_KEYDOWN, WM_SYSKEYDOWN, WM_KEYUP, WM_SYSKEYUP):
+                is_down = wParam in (WM_KEYDOWN, WM_SYSKEYDOWN)
+                if self.engine.handle_key_event(kb.vkCode, is_down):
+                    return 1
+        return user32.CallNextHookEx(None, nCode, wParam, lParam)
 
 
 # ---------------------------------------------------------------------------
@@ -256,7 +456,7 @@ class ClickerEngine:
 
     THREAD_PRIORITY_TIME_CRITICAL = 15
 
-    def __init__(self):
+    def __init__(self, gate=None):
         self.running = False
         self.enabled = False
         self.cps = 20.0
@@ -264,6 +464,7 @@ class ClickerEngine:
         self.button = "Left"
         self._thread = None
         self._timer_boosted = False
+        self.gate = gate  # LicenseGate instance; None = no gate (never ship like this)
 
     def start(self):
         self.running = True
@@ -323,7 +524,12 @@ class ClickerEngine:
         impossible without needing a guard.
         """
         while self.running and self.enabled:
-            cps = max(self.cps, 0.1)
+            multiplier = self.gate.click_multiplier() if self.gate else 1.0
+            if multiplier <= 0:
+                time.sleep(0.5)  # unlicensed / revoked - idle, don't click
+                continue
+
+            cps = max(self.cps * multiplier, 0.1)
             cdc = min(max(self.cdc, 1.0), 99.0)
             period = 1.0 / cps
             down_time = period * (cdc / 100.0)
@@ -367,9 +573,10 @@ def card_title(parent, text, accent):
 # ---------------------------------------------------------------------------
 
 class AutoClickerApp:
-    def __init__(self, root):
+    def __init__(self, root, gate=None):
         self.root = root
-        self.engine = ClickerEngine()
+        self.gate = gate
+        self.engine = ClickerEngine(gate=gate)
         self.engine.start()
 
         s = load_settings()
@@ -389,14 +596,21 @@ class AutoClickerApp:
         self.engine.cdc = self.cdc_value
         self.engine.button = self.button_var.get()
 
+        self.socd_engine = SOCDEngine()
+        self.socd_engine.set_mode(s.get("socd_mode", "wasd"))
+        self.socd_engine.enabled = bool(s.get("socd_enabled", False))
+        self.socd_hook = SOCDHook(self.socd_engine)
+        self.socd_hook.start()
+
         self.accent_swatch_canvases = []
 
         root.title("Desyx")
         root.configure(bg=BG)
-        WIN_W, WIN_H = 460, 660
+        WIN_W, WIN_H = 460, 700
         root.geometry(f"{WIN_W}x{WIN_H}")
         root.resizable(False, False)
 
+        self.current_tab = "MAIN"
         self._build_ui()
         self._style_mode_buttons()
         self._style_button_buttons()
@@ -423,6 +637,47 @@ class AutoClickerApp:
 
         tk.Frame(root_frame, bg=CARD_BORDER, height=1).pack(fill="x", padx=20, pady=(0, 16))
 
+        # --- tab bar ---
+        tab_bar = tk.Frame(root_frame, bg=BG)
+        tab_bar.pack(fill="x", padx=20, pady=(0, 14))
+        self.tab_buttons = {}
+        for name in ["MAIN", "SOCD"]:
+            b = tk.Button(tab_bar, text=name, relief="flat", bd=0, font=("Segoe UI", 10, "bold"),
+                          command=lambda n=name: self._switch_tab(n), padx=14, pady=8)
+            b.pack(side="left", padx=(0, 6))
+            self.tab_buttons[name] = b
+
+        # --- page container (only one page is packed at a time) ---
+        self.page_container = tk.Frame(root_frame, bg=BG)
+        self.page_container.pack(fill="both", expand=True)
+
+        self.main_page = tk.Frame(self.page_container, bg=BG)
+        self.socd_page = tk.Frame(self.page_container, bg=BG)
+
+        self._build_main_page(self.main_page)
+        self._build_socd_page(self.socd_page)
+
+        self._switch_tab(self.current_tab)
+
+    def _switch_tab(self, name):
+        self.current_tab = name
+        self.main_page.pack_forget()
+        self.socd_page.pack_forget()
+        if name == "MAIN":
+            self.main_page.pack(fill="both", expand=True)
+        else:
+            self.socd_page.pack(fill="both", expand=True)
+        self._style_tab_buttons()
+
+    def _style_tab_buttons(self):
+        for name, btn in self.tab_buttons.items():
+            if name == self.current_tab:
+                btn.configure(bg=self.accent, fg="#ffffff")
+            else:
+                btn.configure(bg="#24242e", fg=SUBTEXT)
+
+    # ----- MAIN page -----
+    def _build_main_page(self, root_frame):
         # --- SPEED card ---
         speed_card = card(root_frame)
         speed_card.pack(fill="x", padx=20, pady=(0, 14))
@@ -528,6 +783,66 @@ class AutoClickerApp:
                                      relief="flat", bd=0, command=self._toggle, height=2)
         self.toggle_btn.pack(fill="x", padx=20, pady=(4, 20))
         self._refresh_toggle_label()
+
+    # ----- SOCD page -----
+    def _build_socd_page(self, root_frame):
+        socd_card = card(root_frame)
+        socd_card.pack(fill="x", padx=20, pady=(0, 14))
+        self.socd_title = card_title(socd_card, "\u2194 SOCD", self.accent)
+
+        tk.Label(socd_card, text="Simultaneous Opposing Cardinal Directions.\n"
+                                  "When two opposite keys are held together, the one\n"
+                                  "pressed most recently overrides the other (last\n"
+                                  "input wins) - the earlier key resumes once you\n"
+                                  "let go of whichever one is currently winning.",
+                 bg=CARD_BG, fg=SUBTEXT, font=("Segoe UI", 9), justify="left").pack(
+            anchor="w", padx=16, pady=(0, 14))
+
+        self.socd_toggle_btn = tk.Button(socd_card, text="", font=("Segoe UI", 12, "bold"),
+                                          relief="flat", bd=0, command=self._toggle_socd, height=2)
+        self.socd_toggle_btn.pack(fill="x", padx=16, pady=(0, 16))
+
+        tk.Frame(socd_card, bg=CARD_BORDER, height=1).pack(fill="x", padx=16, pady=(0, 14))
+
+        scope_wrap = tk.Frame(socd_card, bg=CARD_BG)
+        scope_wrap.pack(fill="x", padx=16, pady=(0, 18))
+        tk.Label(scope_wrap, text="applies to", bg=CARD_BG, fg=SUBTEXT, font=("Segoe UI", 9)).pack(anchor="w")
+        scope_row = tk.Frame(scope_wrap, bg=CARD_BG)
+        scope_row.pack(anchor="w", pady=(6, 0))
+        self.socd_scope_buttons = {}
+        for key, label in [("wasd", "WASD only"), ("every", "WASD + Arrow Keys")]:
+            b = tk.Button(scope_row, text=label, relief="flat", bd=0, font=("Segoe UI", 10, "bold"),
+                          command=lambda k=key: self._set_socd_scope(k), padx=10, pady=6)
+            b.pack(side="left", padx=(0, 6))
+            self.socd_scope_buttons[key] = b
+
+        self._style_socd_scope_buttons()
+        self._refresh_socd_toggle_label()
+
+    def _toggle_socd(self):
+        self.socd_engine.enabled = not self.socd_engine.enabled
+        self._refresh_socd_toggle_label()
+        self._save()
+
+    def _refresh_socd_toggle_label(self):
+        if self.socd_engine.enabled:
+            self.socd_toggle_btn.config(text="\u25A0  SOCD enabled  (click to disable)",
+                                         bg="#24242e", fg=self.accent)
+        else:
+            self.socd_toggle_btn.config(text="\u25B6  SOCD disabled  (click to enable)",
+                                         bg=self.accent, fg="#ffffff")
+
+    def _set_socd_scope(self, mode):
+        self.socd_engine.set_mode(mode)
+        self._style_socd_scope_buttons()
+        self._save()
+
+    def _style_socd_scope_buttons(self):
+        for key, btn in self.socd_scope_buttons.items():
+            if key == self.socd_engine.mode:
+                btn.configure(bg=self.accent, fg="#ffffff")
+            else:
+                btn.configure(bg="#24242e", fg=SUBTEXT)
 
     # ----- big fixed-format number entry (digits + single "." only, always N.NN) -----
     def _make_big_number_entry(self, parent, initial_value, suffix, commit_callback):
@@ -687,7 +1002,7 @@ class AutoClickerApp:
     def _apply_accent(self):
         self.accent_bar.configure(bg=self.accent)
         self.title_label.configure(fg=self.accent)
-        for title in [self.speed_title, self.controls_title, self.accent_title]:
+        for title in [self.speed_title, self.controls_title, self.accent_title, self.socd_title]:
             title.configure(fg=self.accent)
         self.hotkey_box.configure(highlightbackground=self.accent)
         self.hotkey_icon.configure(fg=self.accent)
@@ -701,6 +1016,9 @@ class AutoClickerApp:
             if c.color == self.accent:
                 c.create_oval(0, 0, 34, 34, outline=self.accent, width=2, tags="ring")
         self._refresh_toggle_label()
+        self._style_tab_buttons()
+        self._style_socd_scope_buttons()
+        self._refresh_socd_toggle_label()
 
     # ----- settings persistence -----
     def _save(self):
@@ -711,16 +1029,38 @@ class AutoClickerApp:
             "button": self.button_var.get(),
             "hotkey_combo": self.hotkey_combo,
             "trigger_mode": self.trigger_mode,
+            "socd_enabled": self.socd_engine.enabled,
+            "socd_mode": self.socd_engine.mode,
         })
 
 
 def main():
+    gate = LicenseGate()
+    gate.start()  # does an immediate check, then keeps re-checking in the background
+
     root = tk.Tk()
-    app = AutoClickerApp(root)
+    root.withdraw()  # keep hidden until we know the license is valid
+
+    valid, reason = gate.status()
+    if not valid:
+        import tkinter.messagebox as mb
+        mb.showerror(
+            "Desyx",
+            f"Access denied.\n({reason})\n\n"
+            f"Your code: {gate.hwid}\n"
+            f"Send this code to the developer to get access."
+        )
+        root.destroy()
+        sys.exit(1)
+
+    root.deiconify()
+    app = AutoClickerApp(root, gate=gate)
 
     def on_close():
         app._save()
         app.engine.stop()
+        app.socd_hook.stop()
+        gate.stop()
         root.destroy()
 
     root.protocol("WM_DELETE_WINDOW", on_close)
